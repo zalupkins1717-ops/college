@@ -39,7 +39,7 @@ function rel(z, e) {
 console.log("Задание 1");
 for (const [x, xp] of [[25, 24.8], [10, 10.8]]) {
   const [d, r] = actualErrors(x, xp);
-  console.log(`x=${x} прибл=${xp}: Δ=${d}, δ=${r.toFixed(2)}%`);
+  console.log(`x=${x} прибл=${xp}: Δ=${d.toFixed(4)}, δ=${r.toFixed(2)}%`);
 }
 
 // ---------- Задание 2 ----------
@@ -47,8 +47,8 @@ console.log("\nЗадание 2");
 const x = 17.3862;
 const okr = Math.round(x * 100) / 100;
 const usek = Math.trunc(x * 100) / 100;
-console.log(`Округление: ${okr}, погрешность ${Math.abs(x - okr).toFixed(4)} (граница 0.005)`);
-console.log(`Усечение:   ${usek}, погрешность ${Math.abs(x - usek).toFixed(4)} (граница 0.01)`);
+console.log(`Округление: ${okr.toFixed(2)}, погрешность ${Math.abs(x - okr).toFixed(4)} (граница 0.005)`);
+console.log(`Усечение:   ${usek.toFixed(2)}, погрешность ${Math.abs(x - usek).toFixed(4)} (граница 0.01)`);
 
 // ---------- Задание 3 ----------
 console.log("\nЗадание 3");
@@ -56,34 +56,34 @@ const a = 12, b = 4, ea = 0.1, eb = 0.1;
 
 for (const [name, f] of [["+", add], ["-", sub], ["*", mul]]) {
   const [z, e] = f(a, b, ea, eb);
-  console.log(`${name}: z=${z}, ε=${e}, r=${rel(z, e).toFixed(2)}%`);
+  console.log(`${name}: z=${z.toFixed(2)}, ε=${e.toFixed(4)}, r=${rel(z, e).toFixed(2)}%`);
 }
 {
   const [z, eRaw] = div(a, b, ea, eb);
   const e = Math.ceil(eRaw * 1000) / 1000; // вверх до тысячных
-  console.log(`/: z=${z}, ε=${e}, r=${rel(z, e).toFixed(2)}%`);
+  console.log(`/: z=${z.toFixed(2)}, ε=${e.toFixed(3)}, r=${rel(z, e).toFixed(2)}%`);
 }
 
 // ---------- Задание 4 ----------
 console.log("\nЗадание 4");
 const [S, eS] = mul(20, 10, 0.1, 0.1);
 const Smin = 19.9 * 9.9, Smax = 20.1 * 10.1;
-console.log(`S = ${S} см², εS = ${eS.toFixed(2)} см², r = ${rel(S, eS).toFixed(2)}%`);
+console.log(`S = ${S.toFixed(2)} см², εS = ${eS.toFixed(2)} см², r = ${rel(S, eS).toFixed(2)}%`);
 console.log(`[Smin; Smax] = [${Smin.toFixed(2)}; ${Smax.toFixed(2)}]`);
-console.log(`[0.98S; 1.02S] = [${0.98 * S}; ${1.02 * S}]`);
+console.log(`[0.98S; 1.02S] = [${(0.98 * S).toFixed(2)}; ${(1.02 * S).toFixed(2)}]`);
 console.log("Условие ±2%:", Smin >= 0.98 * S && Smax <= 1.02 * S);
 
 // ---------- Задание 5 ----------
 console.log("\nЗадание 5");
 for (const [b5, eb5] of [[2, 0.1], [9, 0.1], [9.8, 0.1]]) {
   const [z, e] = sub(10, b5, 0.1, eb5);
-  console.log(`b=${b5}: z=${z}, ε=${e}, r=${rel(z, e).toFixed(2)}%, [${z - e}; ${z + e}]`);
+  console.log(`b=${b5}: z=${z.toFixed(2)}, ε=${e.toFixed(4)}, r=${rel(z, e).toFixed(2)}%, [${(z - e).toFixed(2)}; ${(z + e).toFixed(2)}]`);
 }
 
 // ---------- Проверки ----------
 console.log("\nПроверки");
 const [, e81] = mul(6, 2, 0.1, 0.1);
-console.log("6*2 ε =", e81, "| ок:", Math.abs(e81 - 0.81) < 1e-12);
+console.log("6*2 ε =", e81.toFixed(2), "| ок:", Math.abs(e81 - 0.81) < 1e-12);
 
 for (const [name, fn, args] of [
   ["деление на 0", div, [5, 0, 0.1, 0.1]],
