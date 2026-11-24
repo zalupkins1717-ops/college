@@ -42,8 +42,6 @@ svg { flex-shrink: 0; }
 .library-label { margin-top: 32px; }
 .nav-count { font-size: 11px; background: #d8dee8; color: #475569; min-width: 21px; padding: 1px 5px; border-radius: 4px; margin-left: auto; text-align: center; }
 .sidebar-navigation { overflow-y: auto; min-height: 0; }
-.sidebar-bottom { margin-top: auto; padding-top: 35px; }
-.local-status { border-top: 1px solid var(--line); padding: 20px 12px 0; color: #475569; font-size: 12px; line-height: 1.7; }
 .live-dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #475569; flex-shrink: 0; }
 .main-shell { margin-left: var(--sidebar-width); }
 .topbar { height: 72px; border-bottom: 1px solid var(--line); padding: 0 40px; display: flex; align-items: center; justify-content: space-between; gap: 15px; }

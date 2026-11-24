@@ -9,7 +9,6 @@ import { useHistory } from '../shared/hooks/useHistory';
 import type { HistoryEntry } from '../shared/hooks/useHistory';
 import NumericalPage from '../modules/numerical/NumericalPage';
 import { isNumericalMode, numericalTitles } from '../modules/numerical/service';
-import { historyStorageLabel } from '../shared/history/repository';
 import { Logo } from '../shared/ui/Logo';
 
 export default function App() { return <HashRouter><AppShell /></HashRouter>; }
@@ -39,7 +38,6 @@ function AppShell() {
         <NavLink to="/reference" className={({ isActive }) => `nav-item ${isActive ? 'nav-active' : ''}`}><BookOpen size={18} strokeWidth={1.8} /><span>Справочник формул</span></NavLink>
         <NavLink to="/history" className={({ isActive }) => `nav-item ${isActive ? 'nav-active' : ''}`}><History size={18} strokeWidth={1.8} /><span>История расчётов</span>{history.entries.length > 0 && <span className="nav-count">{history.entries.length}</span>}</NavLink>
       </nav>
-      <div className="sidebar-bottom"><div className="local-status">{historyStorageLabel}</div></div>
     </aside>
 
     <div className="main-shell"><header className="topbar"><div className="breadcrumbs"><button className="mobile-menu icon-button" aria-label="Открыть меню" onClick={() => setMobileOpen(true)}><Menu size={21} /></button><span className="breadcrumb-root">{isLibrary ? 'Материалы' : isNumericalMode(currentId) ? 'Численные методы' : 'Калькуляторы'}</span><ChevronRight size={13} /><span>{title}</span></div><div className="topbar-right"><Link to="/reference" className="topbar-help"><BookOpen size={18} /><span>Справочник</span></Link></div></header>
