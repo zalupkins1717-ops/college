@@ -1,64 +1,145 @@
-import { localHistoryDatabase } from './database';
 import type { HistoryRepository } from './database';
 
-declare global {
-  interface Window { __MERA_SQLITE__?: boolean }
+const apiBase = (import.meta.env.VITE_HISTORY_API_URL || '/api').replace(/\/+$/, '');
+
+const cookieName = 'mera_history_session';
+const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
+
+function readSessionToken() {
+  const cookie = document.cookie.split(';').map(part => part.trim())
+    .find(part => part.startsWith(cookieName + '='));
+  const token = cookie?.slice(cookieName.length + 1);
+  return token && tokenPattern.test(token) ? token : undefined;
 }
 
-export const usingSQLite = typeof window !== 'undefined' && window.__MERA_SQLITE__ === true;
-export const historyStorageLabel = usingSQLite ? 'История сохраняется в SQLite' : 'История сохраняется в этом браузере';
+function saveSessionToken(token: unknown) {
+  if (typeof token !== 'string' || !tokenPattern.test(token)) {
+    throw new Error('Сервер вернул некорректный идентификатор сеанса.');
+  }
+  const directory = window.location.pathname.replace(/\/index\.html$/, '/').replace(/\/?$/, '/');
+  document.cookie = cookieName + '=' + token + '; Path=' + directory + '; Max-Age=31536000; Secure; SameSite=Strict';
+  if (readSessionToken() !== token) throw new Error('Не удалось открыть персональную историю.');
+}
 
-function sqliteRepository(): HistoryRepository {
+// Calls made from Pages use a first-party session identifier since the API has its own origin.
+function serverRepository(): HistoryRepository {
+  const location = typeof window === 'undefined' ? undefined : window.location;
+  const api = location && new URL(apiBase, location.href);
+  const crossOrigin = api !== undefined && api.origin !== location?.origin;
+
+  function apiFetch(path: string, init?: RequestInit) {
+    const headers = new Headers(init?.headers);
+    if (crossOrigin) {
+      if (api?.protocol !== 'https:' || location?.protocol !== 'https:') {
+        throw new Error('Для соединения с сервером требуется HTTPS.');
+      }
+      headers.set('X-Mera-Client', 'pages');
+      const token = readSessionToken();
+      if (token) headers.set('Authorization', 'Bearer ' + token);
+    }
+    return fetch(apiBase + path, {
+      ...init, headers, credentials: crossOrigin ? 'omit' : 'same-origin', cache: 'no-store',
+      redirect: 'error',
+    });
+  }
+
   let session: Promise<void> | undefined;
-  const eventName = 'mera:server-history';
   let channel: BroadcastChannel | undefined;
   const listeners = new Set<() => void>();
-  const refresh = () => { for (const fn of listeners) fn(); };
-  const focus = () => { if (document.visibilityState === 'visible') refresh(); };
+
+  function refresh() {
+    for (const listener of listeners) listener();
+  }
+
+  function onVisible() {
+    if (document.visibilityState === 'visible') refresh();
+  }
+
+  async function openSession() {
+    const response = await apiFetch('/session');
+    if (crossOrigin && response.status === 201) {
+      const sessionInfo = await response.json();
+      saveSessionToken(sessionInfo.token);
+      return;
+    }
+    if (response.status !== 204 || (crossOrigin && !readSessionToken())) {
+      throw new Error('Не удалось открыть сеанс истории.');
+    }
+  }
+
   function ready() {
-    session ??= fetch('/api/session', { credentials: 'same-origin', cache: 'no-store' })
-      .then(response => { if (!response.ok) throw new Error('Не удалось открыть сеанс SQLite.'); })
-      .catch((error: unknown) => { session = undefined; throw error; });
+    if (!session) {
+      // Prevent simultaneous first visits in separate tabs from creating different sessions.
+      const opening = typeof navigator !== 'undefined' && navigator.locks
+        ? navigator.locks.request('mera:open-history-session', openSession)
+        : openSession();
+      session = Promise.resolve(opening).catch((error: unknown) => {
+        session = undefined;
+        throw error;
+      });
+    }
     return session;
   }
-  async function request(path = '', init?: RequestInit) {
+
+  async function request(expectedStatus: number, path = '', init?: RequestInit) {
+    const endpoint = '/history' + path;
     await ready();
-    const response = await fetch('/api/history' + path, { cache: 'no-store', credentials: 'same-origin', ...init });
-    if (!response.ok) {
-      if (response.status === 401) session = undefined;
-      throw new Error('Сервер истории вернул ошибку.');
+    let response = await apiFetch(endpoint, init);
+    if (response.status === 401) {
+      session = undefined;
+      await ready();
+      response = await apiFetch(endpoint, init);
     }
+    if (response.status !== expectedStatus) throw new Error('Сервер истории вернул ошибку.');
     return response;
   }
+
   function notify() {
     refresh();
-    try { channel?.postMessage('changed'); } catch { /* The local view is already refreshed. */ }
+    try { channel?.postMessage('changed'); } catch { /* Other tabs refresh when visible. */ }
   }
+
   return {
-    async list() { return (await request()).json(); },
+    async list() {
+      return (await request(200)).json();
+    },
     async add(entry) {
-      await request('', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry) });
+      await request(201, '', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(entry),
+      });
       notify();
     },
-    async remove(id) { await request('/' + encodeURIComponent(id), { method: 'DELETE' }); notify(); },
-    async clear() { await request('', { method: 'DELETE' }); notify(); },
-    subscribe(fn) {
+    async remove(id) {
+      await request(204, '/' + encodeURIComponent(id), { method: 'DELETE' });
+      notify();
+    },
+    async clear() {
+      await request(204, '', { method: 'DELETE' });
+      notify();
+    },
+    subscribe(listener) {
       if (!listeners.size) {
         if (typeof BroadcastChannel !== 'undefined') {
-          try { channel = new BroadcastChannel(eventName); channel.onmessage = refresh; } catch { /* Refocus refresh still works. */ }
+          try {
+            channel = new BroadcastChannel('mera:server-history');
+            channel.onmessage = refresh;
+          } catch { /* Refreshing on visibility change is still available. */ }
         }
-        document.addEventListener('visibilitychange', focus);
+        document.addEventListener('visibilitychange', onVisible);
       }
-      listeners.add(fn);
+      listeners.add(listener);
       return () => {
-        listeners.delete(fn);
+        listeners.delete(listener);
         if (!listeners.size) {
-          document.removeEventListener('visibilitychange', focus);
-          channel?.close(); channel = undefined;
+          document.removeEventListener('visibilitychange', onVisible);
+          channel?.close();
+          channel = undefined;
         }
       };
     },
   };
 }
 
-export const historyRepository = usingSQLite ? sqliteRepository() : localHistoryDatabase;
+export const historyRepository = serverRepository();
