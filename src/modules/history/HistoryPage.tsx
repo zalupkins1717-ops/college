@@ -3,8 +3,6 @@ import { Link } from 'react-router-dom';
 import { ArrowUpRight, Download, History, RotateCcw, Trash2 } from 'lucide-react';
 import type { HistoryEntry } from '../../shared/hooks/useHistory';
 
-import { historyStorageLabel } from '../../shared/history/repository';
-
 interface HistoryPageProps {
   loading: boolean;
   entries: HistoryEntry[];
@@ -126,7 +124,7 @@ export default function HistoryPage({ loading, entries, onRemove, onClear, onRes
               </article>
             ))}
           </div>
-          <p className="muted">{historyStorageLabel}. При сохранении 51-го расчёта самый ранний удалится.</p>
+          <p className="muted">В истории остаются последние 50 расчётов.</p>
         </>
       ) : (
         <section className="empty-state">
