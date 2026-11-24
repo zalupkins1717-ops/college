@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: mera-college-api
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: pip install -r server/requirements.txt && npm ci && npm run build
+    startCommand: python3 server/app.py --host 0.0.0.0 --public-origin "$RENDER_EXTERNAL_URL"
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: MERA_FRONTEND_ORIGIN
+        value: https://zalupkins1717-ops.github.io
+      - key: DATABASE_URL
+        fromDatabase:
+          name: mera-college-db
+          property: connectionString
+
+databases:
+  - name: mera-college-db
+    plan: free
+    region: oregon
+    ipAllowList: []
