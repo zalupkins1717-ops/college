@@ -3,7 +3,10 @@ import { Link } from 'react-router-dom';
 import { ArrowUpRight, Download, History, RotateCcw, Trash2 } from 'lucide-react';
 import type { HistoryEntry } from '../../shared/hooks/useHistory';
 
+import { historyStorageLabel } from '../../shared/history/repository';
+
 interface HistoryPageProps {
+  loading: boolean;
   entries: HistoryEntry[];
   onRemove: (id: string) => void;
   onClear: () => void;
@@ -11,6 +14,11 @@ interface HistoryPageProps {
   error: string | null;
 }
 
+const inputLabels: Record<string, string> = {
+  expression: 'Функция', axis: 'Переменная', h: 'Шаг', min: 'Начало интервала', max: 'Конец интервала',
+  unit: 'Единица', tolerance: 'Допуск, %', ea: 'Погрешность a', eb: 'Погрешность b', exact: 'Точное значение',
+  approx: 'Приближение', operation: 'Операция', digits: 'Знаки округления', displayPrecision: 'Точность отображения',
+};
 const dateFormatter = new Intl.DateTimeFormat('ru-RU', {
   day: 'numeric',
   month: 'long',
@@ -48,7 +56,7 @@ function downloadHistory(entries: HistoryEntry[]) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-export default function HistoryPage({ entries, onRemove, onClear, onRestore, error }: HistoryPageProps) {
+export default function HistoryPage({ loading, entries, onRemove, onClear, onRestore, error }: HistoryPageProps) {
   const [confirmClear, setConfirmClear] = useState(false);
 
   function clearHistory() {
@@ -68,7 +76,7 @@ export default function HistoryPage({ entries, onRemove, onClear, onRestore, err
 
       {error && <p className="inline-error" role="alert">{error}</p>}
 
-      {entries.length > 0 ? (
+      {loading ? <p role="status">Загрузка истории…</p> : entries.length > 0 ? (
         <>
           <div className="history-actions">
             <p className="history-count">Сохранено: {entries.length} из 50</p>
@@ -101,6 +109,7 @@ export default function HistoryPage({ entries, onRemove, onClear, onRestore, err
                 {entry.details.length > 0 && (
                   <p className="muted">{entry.details.join(' · ')}</p>
                 )}
+                <details className="history-inputs"><summary>Исходные данные</summary><dl>{Object.entries(entry.inputs).map(([key, val]) => <div key={key}><dt>{inputLabels[key] ?? key}</dt><dd>{val || (key === 'h' ? 'Автоматически' : '—')}</dd></div>)}</dl></details>
                 <div className="history-item-actions">
                   <button className="button button-secondary" type="button" onClick={() => onRestore(entry)}>
                     <RotateCcw size={15} aria-hidden="true" /> Восстановить
@@ -117,13 +126,13 @@ export default function HistoryPage({ entries, onRemove, onClear, onRestore, err
               </article>
             ))}
           </div>
-          <p className="muted">История хранится только в этом браузере. При сохранении 51-го расчёта самый ранний удалится.</p>
+          <p className="muted">{historyStorageLabel}. При сохранении 51-го расчёта самый ранний удалится.</p>
         </>
       ) : (
         <section className="empty-state">
           <History size={34} strokeWidth={1.4} aria-hidden="true" />
           <h2>Здесь будут ваши расчёты</h2>
-          <p className="muted">Нажмите «Сохранить расчёт» в калькуляторе — и результат появится в истории.</p>
+          <p className="muted">Измените данные в калькуляторе или выполните расчёт в разделе «Численные методы». Здесь появятся исходные значения и результат.</p>
           <Link className="button button-primary" to="/area">
             Перейти к расчётам <ArrowUpRight size={16} aria-hidden="true" />
           </Link>

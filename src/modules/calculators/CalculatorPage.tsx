@@ -8,31 +8,32 @@ import { getCalculator, getDefaults } from './model/catalog';
 import type { CalculatorId, Inputs } from './model/catalog';
 import { evaluate } from './model/evaluate';
 import type { Result } from './model/evaluate';
+import { useCalculationHistory } from './useCalculationHistory';
 import GeometryPreview from './components/GeometryPreview';
 
-interface Props {
-  id: CalculatorId;
-  onSave: (entry: Omit<HistoryEntry, 'id' | 'createdAt'>) => boolean;
-  storageError: string | null;
-}
-
-export default function CalculatorPage({ id, onSave, storageError }: Props) {
+export default function CalculatorPage({ id }: { id: CalculatorId }) {
   const calculator = getCalculator(id);
   const location = useLocation();
   const [inputs, setInputs] = useState<Inputs>(() => getDefaults(id));
   const [digits, setDigits] = useState(2);
   const [formulaOpen, setFormulaOpen] = useState(false);
   const [notice, setNotice] = useState('');
-  const [saved, setSaved] = useState(false);
+  const { record, restored: markRestored, saved, storageError } = useCalculationHistory(id);
   const [copyState, setCopyState] = useState(false);
 
   useEffect(() => {
     const restored = (location.state as { restore?: HistoryEntry } | null)?.restore;
     if (restored?.calculatorId === id) {
-      setInputs({ ...getDefaults(id), ...restored.inputs });
+      const { displayPrecision, ...previous } = restored.inputs;
+      const precision = Number(displayPrecision);
+      const restoredDigits = [2, 3, 4, 6].includes(precision) ? precision : 2;
+      const restoredInputs = { ...getDefaults(id), ...previous };
+      setInputs(restoredInputs);
+      setDigits(restoredDigits);
+      markRestored(restoredInputs, restoredDigits);
       setNotice('Исходные данные восстановлены из истории');
     }
-  }, [id, location.state]);
+  }, [id, location.state, markRestored]);
 
   useEffect(() => {
     if (!notice) return;
@@ -45,12 +46,15 @@ export default function CalculatorPage({ id, onSave, storageError }: Props) {
     catch (error) { return { result: null, error: error instanceof Error ? error.message : 'Проверьте исходные данные' }; }
   }, [id, inputs, digits]);
 
-  const update = (key: string, value: string) => {
-    setInputs((previous) => ({ ...previous, [key]: value }));
-    setSaved(false);
+  const apply = (next: Inputs, precision = digits) => {
+    setInputs(next);
+    setDigits(precision);
+    record(next, precision);
   };
+  const update = (key: string, value: string) => apply({ ...inputs, [key]: value });
   const reset = () => {
-    setInputs(getDefaults(id)); setSaved(false); setNotice('Восстановлены значения из примера');
+    apply(getDefaults(id));
+    setNotice('Восстановлены значения из примера');
   };
   const result = calculation.result;
   const summary = result ? `${result.label}: ${result.value}${result.unit ? ` ${result.unit}` : ''}` : '';
@@ -62,12 +66,7 @@ export default function CalculatorPage({ id, onSave, storageError }: Props) {
       setTimeout(() => setCopyState(false), 2000);
     } catch { setNotice('Не удалось скопировать. Выделите результат и скопируйте вручную.'); }
   };
-  const save = () => {
-    if (!result) return;
-    if (onSave({ calculatorId: id, title: calculator.title, inputs, summary, details: result.metrics.map((metric) => `${metric.label}: ${metric.value} ${metric.unit ?? ''}`), unit: result.unit })) {
-      setSaved(true); setNotice('Расчёт сохранён в историю');
-    }
-  };
+  const save = () => { if (result) record(inputs, digits, true); };
   const showFormulas = () => {
     setFormulaOpen(true);
     setTimeout(() => document.getElementById('calculation-method')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
@@ -105,11 +104,11 @@ export default function CalculatorPage({ id, onSave, storageError }: Props) {
             </>}
           </div>
           {id === 'area' && <div className="tolerance-row"><div><label htmlFor="tolerance">Допуск</label></div><div className="tolerance-input"><input id="tolerance" name="tolerance" type="text" inputMode="decimal" value={inputs.tolerance} onChange={(event) => update('tolerance', event.target.value)} /><span>%</span></div></div>}
-          <div className="input-footer"><span><span className="live-dot" /> Пересчёт при вводе</span><button className="button button-ghost" onClick={reset}><RotateCcw size={14} /> Сбросить</button></div>
+          <div className="input-footer"><span><span className="live-dot" /> Автосохранение при вводе</span><button className="button button-ghost" onClick={reset}><RotateCcw size={14} /> Сбросить</button></div>
         </section>
 
         {result?.geometry && <GeometryPreview {...result.geometry} />}
-        {id === 'errors' && <section className="panel example-panel"><h2>Примеры</h2><div className="example-buttons"><button className="button button-secondary" onClick={() => { setInputs({ exact: '25', approx: '24.8' }); setSaved(false); }}>25 → 24,8 <ArrowRight size={14} /></button><button className="button button-secondary" onClick={() => { setInputs({ exact: '10', approx: '10.8' }); setSaved(false); }}>10 → 10,8 <ArrowRight size={14} /></button></div></section>}
+        {id === 'errors' && <section className="panel example-panel"><h2>Примеры</h2><div className="example-buttons"><button className="button button-secondary" onClick={() => apply({ exact: '25', approx: '24.8' })}>25 → 24,8 <ArrowRight size={14} /></button><button className="button button-secondary" onClick={() => apply({ exact: '10', approx: '10.8' })}>10 → 10,8 <ArrowRight size={14} /></button></div></section>}
         {result?.rounding && <section className="panel comparison-panel"><div className="panel-heading"><h2>Сравнение методов</h2></div><div className="table-scroll"><table><thead><tr><th>Способ</th><th>Результат</th><th>Граница Δ</th></tr></thead><tbody>{result.rounding.map((row) => <tr key={row.name}><th>{row.name}</th><td>{row.value}</td><td>{row.bound}</td></tr>)}</tbody></table></div><p className="table-note">Фактические погрешности — в блоке «Результат».</p></section>}
         {result?.cancellation && <section className="panel comparison-panel"><div className="panel-heading"><h2>Когда числа сближаются</h2></div><div className="table-scroll"><table><thead><tr><th>Число b</th><th>a − b</th><th>Погрешность r</th></tr></thead><tbody>{result.cancellation.map((row) => <tr key={row.b}><td>{row.b}</td><td>{row.value}</td><td><span className={row.relative !== null && row.relative >= 50 ? 'table-warning' : ''}>{row.relative === null ? 'Не определена' : `${formatNumber(row.relative)}%`}</span></td></tr>)}</tbody></table></div><p className="table-note">Сравнение для текущих a, εa и εb. Чем меньше разность, тем выше относительная погрешность.</p></section>}
       </div>
@@ -128,7 +127,7 @@ export default function CalculatorPage({ id, onSave, storageError }: Props) {
           <div className="result-actions"><button className="button button-primary" onClick={save} disabled={saved}>{saved ? <Check size={17} /> : <BookmarkPlus size={17} />}{saved ? 'Сохранено в историю' : 'Сохранить расчёт'}</button><button className="button icon-button" onClick={copy} aria-label="Скопировать результат" title="Скопировать результат">{copyState ? <Check size={17} /> : <Copy size={17} />}</button></div>
         </section> : <section className="result-panel invalid-result" aria-live="polite"><span className="invalid-icon"><TriangleAlert size={28} /></span><h2>Проверьте исходные данные</h2><p>{calculation.error}</p><span>Результат появится после исправления значений.</span></section>}
         {storageError && <p className="inline-error" role="alert">{storageError}</p>}
-        <div className="precision-control"><span>Знаков после запятой</span><select value={digits} aria-label="Точность отображения" onChange={(event) => setDigits(Number(event.target.value))}>{[2, 3, 4, 6].map((count) => <option key={count} value={count}>{count}</option>)}</select></div>
+        <div className="precision-control"><span>Знаков после запятой</span><select value={digits} aria-label="Точность отображения" onChange={(event) => apply(inputs, Number(event.target.value))}>{[2, 3, 4, 6].map((count) => <option key={count} value={count}>{count}</option>)}</select></div>
         <p className="precision-note"><Info size={13} /> Вычисления выполняются без промежуточного округления.</p>
       </div>
     </div>

@@ -104,6 +104,12 @@ export default function ReferencePage() {
             с ошибкой 0,0038, усечение — 17,38 с ошибкой 0,0062.
           </p>
         </section>
+        <section className="reference-section">
+          <h2 className="section-heading">Численное дифференцирование</h2>
+          <div className="formula-block">f′(x) ≈ [f(x + h) − f(x − h)] / (2h)</div>
+          <p>Для частной производной меняется только выбранная координата. Например, для f(x, y) = x²y в точке (2, 3) получим ∂f/∂x ≈ 12 и ∂f/∂y ≈ 4.</p>
+          <p className="muted">Шаг h должен быть положительным. Слишком маленький шаг усиливает ошибки округления. Углы в тригонометрических функциях задаются в радианах.</p>
+        </section>
       </div>
     </>
   );
