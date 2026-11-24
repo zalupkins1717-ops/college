@@ -1,6 +1,5 @@
-"""Serve the built Mera app and its private, per-browser SQLite history."""
+"""Serve the built Mera app and its calculation history."""
 import argparse
-from contextlib import closing
 from datetime import datetime, timezone
 from hashlib import sha256
 from http import HTTPStatus
@@ -9,36 +8,24 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
 import mimetypes
+import os
 from pathlib import Path
 import re
 import secrets
 import shutil
-import sqlite3
 from urllib.parse import unquote, urlsplit
 import uuid
+
+if __package__:
+    from .storage import Database
+else:
+    from storage import Database
 
 ROOT = Path(__file__).resolve().parent.parent
 COOKIE = "mera_session"
 LIMIT = 50
 MAX_BYTES = 4 * 1024 * 1024
-MARKER = '<script>window.__MERA_SQLITE__=true</script>'
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS sessions (owner TEXT PRIMARY KEY);
-CREATE TABLE IF NOT EXISTS calculations (
-    sequence INTEGER PRIMARY KEY,
-    id TEXT NOT NULL UNIQUE,
-    owner TEXT NOT NULL REFERENCES sessions(owner),
-    created_at TEXT NOT NULL,
-    calculator TEXT NOT NULL,
-    title TEXT NOT NULL,
-    inputs TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    details TEXT NOT NULL,
-    unit TEXT NOT NULL,
-    numerical_result TEXT
-);
-CREATE INDEX IF NOT EXISTS calculations_owner_sequence ON calculations(owner, sequence);
-"""
+TOKEN_PATTERN = r"[A-Za-z0-9_-]{43}"
 
 
 def encoded(value):
@@ -46,7 +33,7 @@ def encoded(value):
 
 
 def text(value, limit):
-    return isinstance(value, str) and len(value) <= limit and not any(
+    return isinstance(value, str) and "\0" not in value and len(value) <= limit and not any(
         "\ud800" <= char <= "\udfff" for char in value
     )
 
@@ -94,15 +81,24 @@ def valid_entry(entry):
             and ("numericalResult" not in entry or valid_result(entry["numericalResult"])))
 
 
-def connect(path):
-    db = sqlite3.connect(path, timeout=10)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys=ON")
-    return db
-
-
 def session_owner(token):
     return sha256(token.encode("ascii")).hexdigest()
+
+
+def parse_public_origin(value):
+    if not value:
+        return None
+    origin = urlsplit(value)
+    if (not origin.hostname or origin.scheme not in {"http", "https"} or origin.username is not None
+        or origin.password is not None or origin.path not in {"", "/"} or origin.query or origin.fragment):
+        raise ValueError("MERA_PUBLIC_ORIGIN должен содержать схему и имя сайта.")
+    if origin.scheme == "http" and origin.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        raise ValueError("Для публичного сайта укажите адрес HTTPS в MERA_PUBLIC_ORIGIN.")
+    hostname = origin.hostname if ":" not in origin.hostname else f"[{origin.hostname}]"
+    port = origin.port
+    if port is not None and port != (443 if origin.scheme == "https" else 80):
+        hostname += f":{port}"
+    return f"{origin.scheme}://{hostname}"
 
 
 def stored(row):
@@ -123,6 +119,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if self.pages_client:
+            self.send_header("Access-Control-Allow-Origin", self.server.frontend_origin)
+            self.send_header("Vary", "Origin")
+            if self.command == "OPTIONS" and status == 204:
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE")
+                self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Mera-Client")
+                self.send_header("Access-Control-Max-Age", "600")
         if status != 204:
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
@@ -136,22 +139,32 @@ class Handler(BaseHTTPRequestHandler):
         self.respond(status, encoded({"error": HTTPStatus(status).phrase}).encode())
 
     def token(self):
+        if self.pages_client:
+            auth = self.headers.get("Authorization", "")
+            match = re.fullmatch("Bearer (" + TOKEN_PATTERN + ")", auth, flags=re.IGNORECASE)
+            return match.group(1) if match else None
         cookies = SimpleCookie()
         try:
             cookies.load(self.headers.get("Cookie", ""))
         except CookieError:
             return None
         token = cookies[COOKIE].value if COOKIE in cookies else ""
-        return token if re.fullmatch(r"[A-Za-z0-9_-]{43}", token) else None
+        return token if re.fullmatch(TOKEN_PATTERN, token) else None
 
     def session(self, db, owner):
         if owner is not None:
             self.respond(204)
             return
         token = secrets.token_urlsafe(32)
-        with db:
+        with db.write():
             db.execute("INSERT INTO sessions VALUES (?)", (session_owner(token),))
-        self.respond(204, cookie=f"{COOKIE}={token}; Path=/api; Max-Age=31536000; HttpOnly; SameSite=Strict")
+        if self.pages_client:
+            self.respond(201, encoded({"token": token}).encode())
+            return
+        cookie = f"{COOKIE}={token}; Path=/api; Max-Age=31536000; HttpOnly; SameSite=Strict"
+        if self.server.public_origin and self.server.public_origin.startswith("https://"):
+            cookie += "; Secure"
+        self.respond(204, cookie=cookie)
 
     def add_entry(self, db, owner):
         if self.headers.get_content_type() != "application/json":
@@ -173,20 +186,20 @@ class Handler(BaseHTTPRequestHandler):
             self.fail(400)
             return
         now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-        with db:
+        with db.write(owner):
             db.execute("""INSERT INTO calculations
                 (id,owner,created_at,calculator,title,inputs,summary,details,unit,numerical_result)
                 VALUES (?,?,?,?,?,?,?,?,?,?)""",
                        (str(uuid.uuid4()), owner, now, entry["calculatorId"], entry["title"],
                         encoded(entry["inputs"]), entry["summary"], encoded(entry["details"]), entry["unit"],
                         encoded(entry["numericalResult"]) if "numericalResult" in entry else None))
-            db.execute("""DELETE FROM calculations WHERE sequence IN
-                (SELECT sequence FROM calculations WHERE owner=? ORDER BY sequence DESC LIMIT -1 OFFSET ?)""",
-                       (owner, LIMIT))
+            db.execute("""DELETE FROM calculations WHERE owner=? AND sequence <=
+                (SELECT sequence FROM calculations WHERE owner=? ORDER BY sequence DESC LIMIT 1 OFFSET ?)""",
+                       (owner, owner, LIMIT))
         self.respond(201)
 
     def history(self, path):
-        with closing(connect(self.server.database)) as db:
+        with self.server.database.session() as db:
             token = self.token()
             owner = None
             if token:
@@ -206,7 +219,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif self.command == "POST":
                     self.add_entry(db, owner)
                 elif self.command == "DELETE":
-                    with db:
+                    with db.write(owner):
                         db.execute("DELETE FROM calculations WHERE owner=?", (owner,))
                     self.respond(204)
                 else:
@@ -217,7 +230,7 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     self.fail(400)
                     return
-                with db:
+                with db.write(owner):
                     db.execute("DELETE FROM calculations WHERE id=? AND owner=?", (id_, owner))
                 self.respond(204)
             else:
@@ -232,8 +245,7 @@ class Handler(BaseHTTPRequestHandler):
             self.fail(404)
             return
         if file == self.server.dist / "index.html":
-            html = file.read_text(encoding="utf-8").replace("<head>", "<head>" + MARKER, 1)
-            self.respond(200, html.encode(), "text/html; charset=utf-8")
+            self.respond(200, file.read_bytes(), "text/html; charset=utf-8")
             return
         with file.open("rb") as source:
             self.send_response(200)
@@ -245,7 +257,35 @@ class Handler(BaseHTTPRequestHandler):
             if self.command != "HEAD":
                 shutil.copyfileobj(source, self.wfile)
 
+    def api_request(self, path, host):
+        origin = self.headers.get("Origin")
+        marker = self.headers.get("X-Mera-Client")
+        expected_origin = self.server.public_origin or "http://" + host
+        if self.server.frontend_origin and origin == self.server.frontend_origin and origin != expected_origin:
+            self.pages_client = True
+            if self.command == "OPTIONS":
+                requested = {h.strip().lower() for h in self.headers.get("Access-Control-Request-Headers", "").split(",")}
+                valid = (self.headers.get("Access-Control-Request-Method") in {"GET", "POST", "DELETE"}
+                         and "x-mera-client" in requested
+                         and requested <= {"authorization", "content-type", "x-mera-client"})
+                if valid:
+                    self.respond(204)
+                else:
+                    self.fail(403)
+                return
+            if marker != "pages":
+                self.fail(403)
+                return
+        elif (self.command == "OPTIONS" or marker is not None or self.headers.get("Authorization") is not None
+              or (origin is not None and origin != expected_origin)
+              or self.headers.get("Sec-Fetch-Site") == "cross-site"
+              or (self.command in {"POST", "DELETE"} and origin is None)):
+            self.fail(403)
+            return
+        self.history(path)
+
     def dispatch(self):
+        self.pages_client = False
         host = self.headers.get("Host", "").lower()
         if host not in self.server.allowed_hosts:
             self.fail(403)
@@ -256,52 +296,55 @@ class Handler(BaseHTTPRequestHandler):
                 self.fail(400)
                 return
             if path.startswith("/api/"):
-                origin = self.headers.get("Origin")
-                if ((origin is not None and origin != "http://" + host)
-                    or self.headers.get("Sec-Fetch-Site") == "cross-site"
-                    or (self.command in {"POST", "DELETE"} and origin is None)):
-                    self.fail(403)
-                    return
-                self.history(path)
+                self.api_request(path, host)
             elif self.command in {"GET", "HEAD"}:
                 self.static(path)
             else:
                 self.fail(405)
         except (UnicodeError, ValueError):
             self.fail(400)
-        except sqlite3.Error:
+        except self.server.database.error:
             self.fail(503)
 
-    do_GET = do_HEAD = do_POST = do_DELETE = dispatch
+    do_GET = do_HEAD = do_POST = do_DELETE = do_OPTIONS = dispatch
 
 
-def make_server(db_path, dist, port):
+def make_server(db_path, dist, port, host="127.0.0.1", public_origin=None, frontend_origin=None, database_url=None):
+    public_origin = parse_public_origin(public_origin)
+    frontend_origin = parse_public_origin(frontend_origin)
     db_path, dist = Path(db_path).resolve(), Path(dist).resolve()
-    if db_path == dist or dist in db_path.parents:
+    if not database_url and (db_path == dist or dist in db_path.parents):
         raise ValueError("Храните базу SQLite за пределами каталога dist.")
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with closing(connect(db_path)) as db:
-        db.execute("PRAGMA journal_mode=WAL")
-        db.executescript(SCHEMA)
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    server.database, server.dist = db_path, dist
+    database = Database(db_path, database_url)
+    server = ThreadingHTTPServer((host, port), Handler)
+    server.database, server.dist = database, dist
+    server.public_origin = public_origin
+    server.frontend_origin = frontend_origin
     port = server.server_address[1]
     hostnames = {"127.0.0.1", "localhost", "[::1]"}
     server.allowed_hosts = {f"{name}:{port}" for name in hostnames}
     if port == 80:
         server.allowed_hosts.update(hostnames)
+    if public_origin:
+        server.allowed_hosts.add(urlsplit(public_origin).netloc)
     return server
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--db", type=Path, default=ROOT / "data" / "history.sqlite3")
+    default_host = "0.0.0.0" if os.environ.get("RENDER") == "true" else "127.0.0.1"
+    parser.add_argument("--host", default=os.environ.get("HOST") or default_host)
+    parser.add_argument("--port", type=int, default=os.environ.get("PORT", "8000"))
+    parser.add_argument("--db", type=Path, default=os.environ.get("MERA_DB_PATH", ROOT / "data" / "history.sqlite3"))
+    parser.add_argument("--public-origin", default=os.environ.get("MERA_PUBLIC_ORIGIN") or os.environ.get("RENDER_EXTERNAL_URL"))
+    parser.add_argument("--frontend-origin", default=os.environ.get("MERA_FRONTEND_ORIGIN"))
     args = parser.parse_args()
     if not (ROOT / "dist" / "index.html").is_file():
         parser.exit(1, "Сначала соберите сайт командой npm run build.\n")
-    with make_server(args.db, ROOT / "dist", args.port) as httpd:
-        print(f"Мера: http://127.0.0.1:{httpd.server_address[1]}/", flush=True)
+    with make_server(args.db, ROOT / "dist", args.port, args.host, args.public_origin,
+                     args.frontend_origin, os.environ.get("DATABASE_URL")) as httpd:
+        origin = httpd.public_origin or f"http://{args.host}:{httpd.server_address[1]}"
+        print(f"Мера: {origin}/", flush=True)
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

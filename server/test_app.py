@@ -1,5 +1,7 @@
 import http.client
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
 import threading
@@ -13,6 +15,8 @@ else:
 
 
 class HistoryAPI(unittest.TestCase):
+    pages_origin = "https://zalupkins1717-ops.github.io"
+
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
@@ -28,7 +32,8 @@ class HistoryAPI(unittest.TestCase):
 
     @classmethod
     def start_server(cls):
-        cls.server = app.make_server(cls.db_file, cls.dist, 0)
+        cls.server = app.make_server(cls.db_file, cls.dist, 0, frontend_origin=cls.pages_origin,
+                                     database_url=os.getenv("MERA_TEST_POSTGRES_URL"))
         cls.server_thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.server_thread.start()
 
@@ -127,7 +132,7 @@ class HistoryAPI(unittest.TestCase):
     def test_static_page_and_api_origin(self):
         status, html, _ = self.call("GET", "/")
         self.assertEqual(status, 200)
-        self.assertLess(html.index(app.MARKER.encode()), html.index(b'type="module"'))
+        self.assertEqual(html, (self.dist / "index.html").read_bytes())
         self.assertEqual(self.call("GET", "/test.js")[0], 200)
         self.assertEqual(self.call("GET", "/../private/history.sqlite3")[0], 404)
         self.assertEqual(self.call("GET", "/%2e%2e/private/history.sqlite3")[0], 404)
@@ -135,6 +140,73 @@ class HistoryAPI(unittest.TestCase):
         self.assertEqual(self.call("POST", "/api/history", cookie, self.entry(), Origin="https://example.org")[0], 403)
         self.assertEqual(self.call("GET", "/api/history", cookie, Host="example.org")[0], 403)
         self.assertEqual(self.rows(cookie), [])
+
+    def test_https_deployment_uses_configured_origin_and_secure_cookie(self):
+        origin = "https://mera.example"
+        with app.make_server(self.db_file, self.dist, 0, public_origin=origin,
+                             database_url=os.getenv("MERA_TEST_POSTGRES_URL")) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with patch.object(self, "server", server):
+                    status, _, headers = self.call("GET", "/api/session", Host="mera.example")
+                    self.assertEqual(status, 204)
+                    self.assertIn("; Secure", headers["Set-Cookie"])
+                    cookie = headers["Set-Cookie"].split(";", 1)[0]
+                    self.assertEqual(self.call("POST", "/api/history", cookie, self.entry(),
+                                               Host="mera.example", Origin=origin)[0], 201)
+                    self.assertEqual(self.call("POST", "/api/history", cookie, self.entry(),
+                                               Host="mera.example", Origin="http://mera.example")[0], 403)
+                    self.assertEqual(len(self.rows(cookie)), 1)
+            finally:
+                server.shutdown()
+                thread.join()
+
+    def test_pages_session_and_history(self):
+        pages = {"Origin": self.pages_origin, "X-Mera-Client": "pages", "Sec-Fetch-Site": "cross-site"}
+        cookie = self.session()
+        status, body, headers = self.call("GET", "/api/session", cookie, **pages)
+        self.assertEqual(status, 201)
+        self.assertIsNone(headers.get("Set-Cookie"))
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["Access-Control-Allow-Origin"], self.pages_origin)
+        token = json.loads(body)["token"]
+        self.assertRegex(token, r"^[A-Za-z0-9_-]{43}$")
+        self.assertEqual(self.call("GET", "/api/history", cookie, **pages)[0], 401)
+        pages["Authorization"] = "Bearer " + token
+        self.assertEqual(self.call("GET", "/api/session", **pages)[0], 204)
+        self.assertEqual(self.call("POST", "/api/history", data=self.entry(), **pages)[0], 201)
+        self.assertEqual(self.rows(cookie), [])
+        status, body, _ = self.call("GET", "/api/history", **pages)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)[0]["summary"], self.entry()["summary"])
+        self.assertEqual(self.call("DELETE", "/api/history", **pages)[0], 204)
+        self.assertEqual(json.loads(self.call("GET", "/api/history", **pages)[1]), [])
+
+    def test_pages_origin_and_preflight(self):
+        headers = {"Origin": self.pages_origin, "Access-Control-Request-Method": "POST",
+                   "Access-Control-Request-Headers": "content-type, authorization, x-mera-client"}
+        status, _, response = self.call("OPTIONS", "/api/history", **headers)
+        self.assertEqual(status, 204)
+        self.assertEqual(response["Access-Control-Allow-Origin"], self.pages_origin)
+        self.assertIn("Authorization", response["Access-Control-Allow-Headers"])
+        self.assertIsNone(response.get("Access-Control-Allow-Credentials"))
+        headers["Origin"] = "https://other.example"
+        status, _, response = self.call("OPTIONS", "/api/history", **headers)
+        self.assertEqual(status, 403)
+        self.assertIsNone(response.get("Access-Control-Allow-Origin"))
+        for extra in [{"Origin": self.pages_origin}, {"X-Mera-Client": "pages"},
+                      {"Origin": "https://other.example", "X-Mera-Client": "pages"}]:
+            self.assertEqual(self.call("GET", "/api/session", **extra)[0], 403)
+
+    def test_concurrent_inserts_keep_limit(self):
+        cookie = self.session()
+        with ThreadPoolExecutor(max_workers=5) as workers:
+            statuses = list(workers.map(
+                lambda i: self.call("POST", "/api/history", cookie, self.entry(str(i)))[0], range(55)
+            ))
+        self.assertEqual(set(statuses), {201})
+        self.assertEqual(len(self.rows(cookie)), 50)
 
 
 if __name__ == "__main__":
