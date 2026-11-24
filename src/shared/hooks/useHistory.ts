@@ -18,7 +18,7 @@ export function useHistory() {
         const result = await historyRepository.list();
         if (request === latest) { setEntries(result); setReadError(null); }
       } catch {
-        if (request === latest) setReadError('Не удалось загрузить историю расчётов. Повторите попытку или проверьте доступ к хранилищу.');
+        if (request === latest) setReadError('Не удалось загрузить историю расчётов. Проверьте соединение с сервером и повторите попытку.');
       } finally {
         if (request === latest) setLoading(false);
       }
@@ -34,7 +34,7 @@ export function useHistory() {
       setWriteError(null);
       return true;
     } catch {
-      setWriteError('Не удалось записать изменения в историю. Проверьте доступ к хранилищу и повторите попытку.');
+      setWriteError('Не удалось записать изменения в историю. Проверьте соединение с сервером и повторите попытку.');
       return false;
     }
   }, []);
